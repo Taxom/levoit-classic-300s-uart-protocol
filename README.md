@@ -76,4 +76,4 @@ You may use, share, and adapt the material for non-commercial purposes only, wit
 
 Commercial use or incorporation into proprietary/closed-source commercial products is not permitted without separate written permission.
 
-See LICENSE for details.
+See [LICENSE](LICENSE) for details.
