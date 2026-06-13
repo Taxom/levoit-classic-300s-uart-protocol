@@ -1,671 +1,757 @@
-<!--
-Reverse-engineered protocol notes for the Levoit Classic 300S humidifier UART link.
-This file is based on captured UART traffic between the appliance MCU and the original WiFi module.
--->
+# A5 UART protocol notes for Levoit Classic 300S MCU / WiFi-module replacement
 
-A5 UART protocol notes for humidifier MCU / WiFi-module replacement
-Version: draft 2026-06-12
-Purpose: packet/status/control description recovered from UART sniffing.
+Version: draft 2026-06-13  
+Purpose: packet/status/control description recovered from UART sniffing and active replacement-controller tests.
 
-# IMPORTANT
-This is a working protocol map from captured logs. Most user-facing commands are confirmed.
-Unknown or not fully proven fields are explicitly marked as UNKNOWN / candidate.
+## IMPORTANT
 
-### UART
+This is a working protocol map from captured logs. Most user-facing commands are confirmed. Unknown or not fully proven fields are explicitly marked as `UNKNOWN` / `candidate` / `very likely`.
+
+## UART
+
+```text
 Baud rate: 9600
-Format: 8N1, no flow control
-Logical directions:
-  WiFi -> MCU : control commands
-  MCU  -> WiFi: replies and status/events
+Format:    8N1, no flow control
+Direction: WiFi -> MCU : control commands
+Direction: MCU  -> WiFi: replies and status/events
+```
 
-### FRAME FORMAT
-All captured A5 frames use this structure:
+Tested replacement-controller wiring:
 
-  offset  size  description
-  0x00    1     0xA5, magic/header
-  0x01    1     frame type
-  0x02    1     packet id
-  0x03    1     payload length low byte
-  0x04    1     payload length high byte
-  0x05    1     checksum
-  0x06    N     payload
+```text
+External ESP32-C3 RX GPIO20 <- humidifier MCU TX
+External ESP32-C3 TX GPIO21 -> humidifier MCU RX
+```
+
+Original module observed in this unit:
+
+```text
+ESP32-SOLO-1C module
+Likely UART pins: ESP32 RX=GPIO16, TX=GPIO17
+```
+
+## Frame format
+
+All captured `A5` frames use this structure:
+
+```text
+offset  size  description
+0x00    1     0xA5 magic/header
+0x01    1     frame type
+0x02    1     packet id
+0x03    1     payload length low byte
+0x04    1     payload length high byte
+0x05    1     checksum
+0x06    N     payload
+```
 
 Total frame size:
 
-  total_length = payload_length + 6
+```text
+total_length = payload_length + 6
+```
 
 Checksum rule:
 
-  sum(all frame bytes including checksum) & 0xFF == 0xFF
+```text
+sum(all frame bytes including checksum) & 0xFF == 0xFF
+```
 
 When building a frame:
 
-  checksum = 0xFF - (sum(all bytes except checksum) & 0xFF)
+```text
+checksum = 0xFF - (sum(all bytes except checksum) & 0xFF)
+```
 
 Known frame types:
 
-  A5-22 = WiFi -> MCU command
-  A5-12 = MCU -> WiFi reply / ACK
-  A5-02 = MCU -> WiFi status / event status
+```text
+A5-22 = WiFi -> MCU command
+A5-12 = MCU -> WiFi reply / ACK
+A5-02 = MCU -> WiFi status / event status
+A5-52 = MCU -> WiFi NACK / rejected command or unsupported value
+```
 
 Packet id notes:
-  - A5-22 command and A5-12 reply usually share the same id.
-  - A5-02 STATUS id is not a reliable monotonic packet counter.
-  - A5-02 id may jump during events, boot sync, or command-triggered status.
-  - Therefore A5-02 packet id gap does not necessarily mean UART packet loss.
 
+- `A5-22` command and `A5-12` reply usually share the same id.
+- `A5-02 STATUS` id is not a reliable monotonic packet counter.
+- `A5-02` id may jump during events, boot sync, or command-triggered status.
+- Therefore an `A5-02` packet id gap does not necessarily mean UART packet loss.
 
-## CONFIRMED WiFi -> MCU COMMANDS, A5-22
+## Confirmed WiFi -> MCU commands, `A5-22`
 
 The following sections list payload only. Full command frame is:
 
-  A5 22 <id> <len_lo> <len_hi> <checksum> <payload...>
-
+```text
+A5 22 <id> <len_lo> <len_hi> <checksum> <payload...>
+```
 
 ### 1. Power / main switch
 
-  01 00 A0 00 00 = power OFF
-  01 00 A0 00 01 = power ON
+```text
+01 00 A0 00 00 = power OFF
+01 00 A0 00 01 = power ON
+```
 
 Confirmed by:
-  - manual power ON/OFF from app;
-  - timer ON/OFF action;
-  - STATUS p07 changes.
 
+- app power ON/OFF;
+- replacement-controller tests;
+- timer ON/OFF action;
+- `STATUS p[7]` changes.
 
-### 2. Night light / night lamp
+### 2. Night light / night lamp brightness
 
-  01 03 A0 00 01 00 = night light OFF
-  01 03 A0 00 01 32 = night light LOW
-  01 03 A0 00 01 64 = night light HIGH
+The night light command accepts a real brightness level, not only the stock app presets.
+
+```text
+01 03 A0 00 01 XX = set night light brightness
+```
+
+Where:
+
+```text
+XX = 0x00..0x64 = 0..100 decimal percent
+```
+
+Observed/stock values:
+
+```text
+01 03 A0 00 01 00 = night light OFF / 0%
+01 03 A0 00 01 32 = night light LOW preset / 50%
+01 03 A0 00 01 64 = night light HIGH preset / 100%
+```
+
+Intermediate values tested and accepted:
+
+```text
+0x0F = 15%
+0x14 = 20%
+0x1E = 30%
+0x46 = 70%
+```
+
+All tested valid values returned normal `A5-12` ACK and were reflected in `STATUS p[18]`.
 
 Related STATUS field:
 
-  p18 = night light level
-    00 = OFF
-    32 = LOW
-    64 = HIGH
+```text
+p[18] = night light brightness level, 0x00..0x64 = 0..100%
+```
 
-Note:
-  Display OFF may also turn night light off, but Display ON does not restore the previous night light level.
-  A replacement ESP should store and restore previous night light state itself if desired.
+### 3. Display / front-panel display state
 
+The display appears to be binary only.
 
-### 3. Display / front-panel display brightness
-
-  01 05 A1 00 00 = display OFF / brightness 0
-  01 05 A1 00 64 = display ON / brightness 100%
+```text
+01 05 A1 00 00 = display OFF
+01 05 A1 00 64 = display ON
+```
 
 Related STATUS field:
 
-  p11 = display brightness
-    00 = OFF
-    64 = ON
+```text
+p[11] = display state
+        0x00 = OFF
+        0x64 = ON
+```
 
+Intermediate values were tested and rejected by the MCU:
+
+```text
+01 05 A1 00 19 = rejected
+01 05 A1 00 2D = rejected
+01 05 A1 00 32 = rejected
+01 05 A1 00 37 = rejected
+01 05 A1 00 41 = rejected
+01 05 A1 00 4B = rejected
+01 05 A1 00 5A = rejected
+```
+
+Observed rejected-value reply form:
+
+```text
+A5 52 <same_id> 04 00 <checksum> 01 05 A1 34
+```
+
+Working interpretation:
+
+```text
+A5-52 = NACK / command rejected
+0x34   = observed error code for unsupported display value/range
+```
 
 ### 4. Timer indicator / timer icon
 
-  01 6A A2 00 00 = timer icon OFF
-  01 6A A2 00 01 = timer icon ON
+```text
+01 6A A2 00 00 = timer icon OFF
+01 6A A2 00 01 = timer icon ON
+```
 
-Important:
-  This does NOT set timer duration.
-  Timer duration is not sent to the MCU. It is counted by the WiFi/Tuya module.
+Important: this does **not** set timer duration. Timer duration is not sent to the MCU. It is counted by the WiFi/Tuya module or replacement ESP.
 
 Observed timer behavior:
-  When timer starts:
-    WiFi -> MCU: 01 6A A2 00 01     // show timer icon
 
-  When timer expires:
-    WiFi -> MCU: 01 00 A0 00 01     // power ON, for ON timer
-    OR
-    WiFi -> MCU: 01 00 A0 00 00     // power OFF, for OFF timer
+```text
+When timer starts:
+  WiFi -> MCU: 01 6A A2 00 01     // show timer icon
 
-    WiFi -> MCU: 01 6A A2 00 00     // hide timer icon
+When timer expires:
+  WiFi -> MCU: 01 00 A0 00 01     // power ON, for ON timer
+  OR
+  WiFi -> MCU: 01 00 A0 00 00     // power OFF, for OFF timer
 
-For replacement ESP:
-  Implement timer duration on ESP side.
-  Use MCU only for timer icon and final power command.
+  WiFi -> MCU: 01 6A A2 00 00     // hide timer icon
+```
 
+For replacement ESP firmware: implement timer duration on the ESP side. Use MCU only for timer icon and final power command.
 
 ### 5. Manual mode / mist level
 
-  01 60 A2 00 00 01 xx = Manual mode, selected mist level xx
+```text
+01 60 A2 00 00 01 XX = manual mode, selected mist level XX
+```
 
-Known xx values:
-  01 = level 1 / minimum
-  05 = level 5 / middle
-  09 = level 9 / maximum
+Known values:
+
+```text
+01 = level 1 / minimum
+05 = level 5 / middle
+09 = level 9 / maximum
+```
 
 Likely valid range:
-  01..09
+
+```text
+01..09
+```
 
 Stock WiFi usually sends this before mode changes:
 
-  01 29 A1 00 01 00 00 00 00 00
+```text
+01 29 A1 00 01 00 00 00 00 00
+```
 
 Then sends the actual manual command:
 
-  01 60 A2 00 00 01 xx
+```text
+01 60 A2 00 00 01 XX
+```
 
 Related STATUS fields:
-  p16 = 01 means MANUAL
-  p17 = selected manual level, e.g. 01 / 05 / 09
-  p12 = actual mist output active, 00 / 01
 
+```text
+p[16] = 0x01 means MANUAL
+p[17] = selected manual level, e.g. 0x01 / 0x05 / 0x09
+p[12] = actual mist output active, 0x00 / 0x01
+```
 
 ### 6. Auto mode / target humidity band
 
-  01 80 40 00 TT LL HH 09 05 01 = Auto mode, humidity target/band
+```text
+01 80 40 00 TT LL HH 09 05 01 = Auto mode, humidity target/band
+```
 
 Where:
-  TT = target humidity
-  LL = lower threshold
-  HH = upper threshold
+
+```text
+TT = target humidity
+LL = lower threshold
+HH = upper threshold
+```
 
 Observed pattern:
-  LL = target - 5
-  HH = target + 5
+
+```text
+LL = target - 5
+HH = target + 5
+```
 
 Examples:
-  1E 19 23 = target 30%, low 25%, high 35%
-  21 1C 26 = target 33%, low 28%, high 38%
-  33 2E 38 = target 51%, low 46%, high 56%
-  3F 3A 44 = target 63%, low 58%, high 68%
-  47 42 4C = target 71%, low 66%, high 76%
+
+```text
+1E 19 23 = target 30%, low 25%, high 35%
+21 1C 26 = target 33%, low 28%, high 38%
+33 2E 38 = target 51%, low 46%, high 56%
+3E 39 43 = target 62%, low 57%, high 67%
+3F 3A 44 = target 63%, low 58%, high 68%
+47 42 4C = target 71%, low 66%, high 76%
+```
 
 Stock WiFi usually sends this before mode changes:
 
-  01 29 A1 00 01 00 00 00 00 00
+```text
+01 29 A1 00 01 00 00 00 00 00
+```
 
 Then sends the actual auto command:
 
-  01 80 40 00 TT LL HH 09 05 01
+```text
+01 80 40 00 TT LL HH 09 05 01
+```
 
 Related STATUS fields:
-  p16 = 00 means AUTO
-  p13 = target humidity
-  p14 = current humidity
-  p17 = auto output state:
-    00 = stopped / target reached
-    01 = active / minimum / maintain state
-  p12 = actual mist output active, 00 / 01
 
+```text
+p[16] = 0x00 means AUTO
+p[13] = target humidity
+p[14] = current humidity
+p[17] = auto output level/state
+p[12] = actual mist output active, 0x00 / 0x01
+```
 
-### 7. Sleep mode / sleep humidity band
+### 7. Sleep mode
 
-  01 82 40 00 TT LL HH 09 05 01 = Sleep mode, humidity target/band
+Sleep mode uses the same target/band structure as Auto, but it should not be exposed as a separate "sleep target" setting unless a separate app-level setting is later confirmed.
+
+```text
+01 82 40 00 TT LL HH 09 05 01 = Sleep mode using target/band
+```
 
 Where:
-  TT = target humidity
-  LL = lower threshold
-  HH = upper threshold
+
+```text
+TT = current/commanded target humidity
+LL = lower threshold, usually TT - 5
+HH = upper threshold, usually TT + 5
+```
 
 Example:
-  33 2E 38 = target 51%, low 46%, high 56%
+
+```text
+3E 39 43 = target 62%, low 57%, high 67%
+```
+
+Observed behavior after switching to Sleep:
+
+```text
+p[16] = 0x02       // SLEEP
+p[17] may become 0x05
+p[18] may become 0x00   // night light off
+p[10] may become 0x00   // stopAtTarget/auto-off disabled
+p[12] may become 0x01   // mist/output active
+```
 
 Related STATUS fields:
-  p16 = 02 means SLEEP
-  p13 = target humidity
-  p14 = current humidity
-  p17 = sleep/auto output state:
-    00 = stopped
-    01 = active / minimum / maintain state
 
+```text
+p[16] = 0x02 means SLEEP
+p[13] = target humidity
+p[14] = current humidity
+p[17] = sleep output level/state
+p[12] = actual mist output active, 0x00 / 0x01
+```
 
 ### 8. Stop at target / Auto-off behavior
 
-App setting name: auto-off.
-Better protocol meaning: stopAtTarget.
+App setting name: auto-off. Better protocol meaning: stopAtTarget.
 
-  01 E5 A5 00 00 = stopAtTarget OFF
-                   When target is reached/exceeded, do not fully stop;
-                   keep minimum/maintain output behavior.
+```text
+01 E5 A5 00 00 = stopAtTarget OFF
+                 When target is reached/exceeded, do not fully stop;
+                 keep minimum/maintain output behavior.
 
-  01 E5 A5 00 01 = stopAtTarget ON
-                   When target is reached/exceeded, stop output.
+01 E5 A5 00 01 = stopAtTarget ON
+                 When target is reached/exceeded, stop output.
+```
 
-This is NOT hysteresis. Hysteresis/band is set by:
+This is not hysteresis. Hysteresis/band is set by:
 
-  01 80 40 00 TT LL HH 09 05 01
+```text
+01 80 40 00 TT LL HH 09 05 01
+```
 
-Observed with target=30 and current=66:
-  stopAtTarget OFF -> STATUS p17=01, p12=01
-  stopAtTarget ON  -> STATUS p17=00, p12=00
+Observed with target below current humidity:
 
+```text
+stopAtTarget OFF -> p[10]=0, p[12]=1, p[17]=1
+stopAtTarget ON  -> p[10]=1, p[12]=0, p[17]=0
+```
+
+Important interpretation:
+
+```text
+p[10] = stopAtTarget / auto-off setting flag, very likely confirmed by behavior
+p[12] = actual mist/output active
+p[17] = selected level / automatic output level/state
+```
 
 ### 9. Request full status
 
-  01 84 40 00 = request full status
+```text
+01 84 40 00 = request full status
+```
 
-MCU replies with A5-12 REPLY, payload length 20, status-like payload:
+MCU replies with `A5-12 REPLY`, payload length 20, status-like payload:
 
-  01 84 40 00 0D 00 01 ... <status fields...>
+```text
+01 84 40 00 0D 00 01 ...
+```
 
 Use this at startup for synchronization.
-
 
 ### 10. Sync / mode-change preamble / internal state
 
 Main observed sync/preamble command:
 
-  01 29 A1 00 01 00 00 00 00 00
+```text
+01 29 A1 00 01 00 00 00 00 00
+```
 
 Observed:
-  - before Auto -> Manual;
-  - before Manual -> Auto;
-  - before mode changes together with 01 60 A2 / 01 80 40 / 01 82 40;
-  - MCU replies with short ACK:
-      01 29 A1 00
+
+- before Auto -> Manual;
+- before Manual -> Auto;
+- before Auto/Manual/Sleep mode changes together with `01 60 A2`, `01 80 40`, `01 82 40`;
+- MCU replies with short ACK: `01 29 A1 00`.
 
 Working interpretation:
-  01 29 A1 = sync / mode-change preamble / internal state command
 
-For MVP replacement firmware:
-  repeat this before switching Auto/Manual/Sleep.
+```text
+01 29 A1 = sync / mode-change preamble / internal state command
+```
+
+For MVP replacement firmware: repeat this before switching Auto/Manual/Sleep.
 
 Additional cold boot variants observed:
 
-  01 29 A1 00 00 4B 00 4B 00 00
-  01 29 A1 00 00 7D 00 7D 00 00
-  01 29 A1 00 01 7D 00 7D 00 00
+```text
+01 29 A1 00 00 4B 00 4B 00 00
+01 29 A1 00 00 7D 00 7D 00 00
+01 29 A1 00 01 7D 00 7D 00 00
+```
 
-Exact meaning: UNKNOWN.
-Likely startup/internal sync or state restore after mains power-up.
+Exact meaning: `UNKNOWN`. Likely startup/internal sync or state restore after mains power-up.
 
-
-## STATUS PACKETS MCU -> WiFi, A5-02
+## Status packets MCU -> WiFi, `A5-02`
 
 Format:
 
-  A5 02 <id> 14 00 <checksum> <20-byte payload>
+```text
+A5 02 <id> 14 00 <checksum> <20-byte payload>
+```
 
 STATUS payload is 20 bytes:
 
-  p00 p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14 p15 p16 p17 p18 p19
-
+```text
+p00 p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14 p15 p16 p17 p18 p19
+```
 
 ### Full STATUS payload map
 
-p00 = 0x01
-  UNKNOWN / constant
+```text
+p[0]  = 0x01 UNKNOWN / constant
+p[1]  = 0x85 UNKNOWN / status object id candidate
+        Note: A5-12 full status reply to 01 84 40 uses 0x84 instead of 0x85.
+p[2]  = 0x40 UNKNOWN / object id part candidate
+p[3]  = 0x00 UNKNOWN / constant
+p[4]  = 0x0D UNKNOWN / constant
+p[5]  = 0x00 UNKNOWN / constant
+p[6]  = 0x01 UNKNOWN / constant
 
-p01 = 0x85
-  UNKNOWN / status object id candidate
-  Note: A5-12 full status reply to 01 84 40 uses 0x84 instead of 0x85.
+p[7]  = Power / main power state
+        0x00 = OFF
+        0x01 = ON
 
-p02 = 0x40
-  UNKNOWN / object id part candidate
+p[8]  = Tank removed flag
+        0x00 = tank installed
+        0x01 = tank removed
 
-p03 = 0x00
-  UNKNOWN / constant
+p[9]  = Water empty / low-water alarm
+        0x00 = water OK
+        0x01 = water empty / low
 
-p04 = 0x0D
-  UNKNOWN / constant
+p[10] = StopAtTarget / Auto-off setting flag, very likely confirmed by behavior
+        0x00 = disabled / keep minimum
+        0x01 = enabled / stop output at target
 
-p05 = 0x00
-  UNKNOWN / constant
+p[11] = Display state
+        0x00 = display OFF
+        0x64 = display ON
+        Intermediate values were tested and rejected by MCU.
 
-p06 = 0x01
-  UNKNOWN / constant
+p[12] = Actual mist/output active
+        0x00 = mist/output OFF or blocked
+        0x01 = mist/output ON / active
 
-p07 = power / main power state
-  00 = OFF
-  01 = ON
+p[13] = Target humidity, percent
+        Hex byte equals decimal percent.
 
-Confirmed by:
-  - app power ON/OFF;
-  - physical button;
-  - water auto-shutdown.
+p[14] = Current humidity, percent
+        Hex byte equals decimal percent.
 
-p08 = tank flag
-  00 = tank installed
-  01 = tank removed
+p[15] = Temperature, °C
+        Confirmed by cooling and warming/breath tests.
+        Observed lower reporting limit appears to be around 10°C.
 
-Confirmed by tank remove/install tests.
+p[16] = Work mode
+        0x00 = AUTO
+        0x01 = MANUAL
+        0x02 = SLEEP
 
-p09 = noWater / low-water alarm
-  00 = water OK
-  01 = low water / empty / water alarm
+p[17] = Level / output level / mode state
+        In MANUAL: selected mist level, e.g. 0x01 / 0x05 / 0x09.
+        In AUTO/SLEEP: automatic output level/state, e.g. 0x00 / 0x01 / 0x05 / 0x09.
+        Physical mist/output is better represented by p[12].
 
-Confirmed independently from tank flag.
+p[18] = Night light brightness level
+        0x00..0x64 = 0..100%
+        Stock app presets: 0x00 OFF, 0x32 LOW, 0x64 HIGH.
 
-p10 = UNKNOWN / ready-ish / internal interlock candidate
-  Not power.
-  Not tank.
-  Not noWater.
-  Not mist output.
-
-Observed examples:
-  water low before shutdown:       p10=01
-  emergency shutdown by water:     p10=00
-  water restored while power OFF:  p10=01
-
-Recommendation:
-  publish/log as p10_raw for now.
-
-p11 = display brightness
-  00 = display OFF
-  64 = display ON / 100%
-
-Confirmed by display off/on.
-
-p12 = actual mist/output active
-  00 = mist/output OFF or blocked
-  01 = mist/output ON / active
+p[19] = 0x00 UNKNOWN / reserved / usually constant
+```
 
 Confirmed by:
-  - manual max + water OK + mist visible -> p12=01
-  - manual max + no water / tank removed / no mist -> p12=00
-  - auto target below current / no mist -> p12=00
-  - stopAtTarget OFF / minimum maintain -> p12=01
 
-p13 = target humidity
-  Value is percent. Hex byte equals decimal percent.
-
-Examples:
-  0x1E = 30%
-  0x32 = 50%
-  0x33 = 51%
-  0x3F = 63%
-  0x47 = 71%
-
-p14 = current humidity
-  Value is percent. Hex byte equals decimal percent.
-
-Examples:
-  0x3F = 63%
-  0x40 = 64%
-  0x41 = 65%
-  0x42 = 66%
-
-p15 = 0x16
-  UNKNOWN / constant / separator-like field
-
-p16 = work mode
-  00 = AUTO
-  01 = MANUAL
-  02 = SLEEP
-
-Confirmed by Auto/Manual/Sleep switching.
-
-p17 = selected level / mode output state
-  In MANUAL:
-    01..09 = selected mist level
-    example: 09 = manual max
-
-  In AUTO/SLEEP:
-    00 = output stopped / target reached
-    01 = active / minimum / maintain state
-
-Important:
-  p17 is selected/requested level or mode-state, not necessarily physical mist.
-  Physical mist/output is better represented by p12.
-
-p18 = night light level
-  00 = OFF
-  32 = LOW
-  64 = HIGH
-
-Confirmed by night light tests.
-
-p19 = 0x00
-  UNKNOWN / reserved / constant
-
+- power ON/OFF tests for `p[7]`;
+- tank remove/install tests for `p[8]`;
+- low-water tests for `p[9]`;
+- stopAtTarget command behavior for `p[10]`;
+- display ON/OFF tests for `p[11]`;
+- visible mist / blocked mist / target behavior for `p[12]`;
+- target changes for `p[13]`;
+- humidity sensor changes for `p[14]`;
+- cooling and breath warming tests for `p[15]`;
+- mode changes for `p[16]`;
+- manual level and auto/sleep output tests for `p[17]`;
+- night light brightness tests for `p[18]`.
 
 ### STATUS examples
 
-1) Power ON, tank installed, water OK, display ON, auto mode, no mist, night light OFF:
+#### 1. Power ON, tank installed, water OK, display ON, auto mode, no mist, night light OFF
 
-  01 85 40 00 0D 00 01 01 00 00 01 64 00 33 42 16 00 00 00 00
-
-Decoded:
-  power=ON
-  tank=installed
-  noWater=OK
-  p10=01
-  display=ON
-  mistOutput=OFF
-  target=51%
-  humidity=66%
-  mode=AUTO
-  level/state=00
-  nightLight=OFF
-
-2) Manual max, tank installed, water OK, mist visible:
-
-  01 85 40 00 0D 00 01 01 00 00 01 64 01 32 41 16 01 09 00 00
+```text
+01 85 40 00 0D 00 01 01 00 00 01 64 00 33 42 16 00 00 00 00
+```
 
 Decoded:
-  power=ON
-  tank=installed
-  noWater=OK
-  p10=01
-  display=ON
-  mistOutput=ON
-  target=50%
-  humidity=65%
-  mode=MANUAL
-  level=09
-  nightLight=OFF
 
-3) Manual max, tank installed, no water, mist stopped, before full shutdown:
+```text
+power=ON
+thank=installed
+water=OK
+stopAtTarget=ON
+display=ON
+mistOutput=OFF
+target=51%
+humidity=66%
+temperature=22°C
+mode=AUTO
+level/state=0
+nightLight=0%
+```
 
-  01 85 40 00 0D 00 01 01 00 01 01 64 00 32 40 16 01 09 00 00
+#### 2. Night light custom brightness 70%
 
-Decoded:
-  power=ON
-  tank=installed
-  noWater=EMPTY
-  p10=01
-  display=ON
-  mistOutput=OFF
-  target=50%
-  humidity=64%
-  mode=MANUAL
-  selectedLevel=09
+```text
+Command payload: 01 03 A0 00 01 46
+STATUS p[18]:    0x46 = 70%
+```
 
-4) Emergency shutdown by low water:
+#### 3. Display intermediate value rejected
 
-  01 85 40 00 0D 00 01 00 00 01 00 64 00 32 40 16 01 09 00 00
+```text
+Command payload: 01 05 A1 00 4B
+MCU reply:       A5-52 NACK, payload 01 05 A1 34
+STATUS p[11]:    remains 0x64 if display was ON
+```
 
-Decoded:
-  power=OFF
-  tank=installed
-  noWater=EMPTY
-  p10=00
-  display=ON
-  mistOutput=OFF
-  target=50%
-  humidity=64%
-  mode=MANUAL
-  selectedLevel=09
+#### 4. Manual mode, level 9 selected, output active
 
-5) Tank removed, water OK, manual max selected, output blocked:
-
-  01 85 40 00 0D 00 01 01 01 00 01 64 00 32 3F 16 01 09 00 00
+```text
+01 85 40 00 0D 00 01 01 00 00 01 64 01 32 41 16 01 09 00 00
+```
 
 Decoded:
-  power=ON
-  tank=removed
-  noWater=OK
-  display=ON
-  mistOutput=OFF
-  mode=MANUAL
-  selectedLevel=09
 
+```text
+power=ON
+tank=installed
+water=OK
+stopAtTarget=ON
+display=ON
+mistOutput=ON
+target=50%
+humidity=65%
+temperature=22°C
+mode=MANUAL
+level=9
+nightLight=0%
+```
 
-## MCU -> WiFi REPLY, A5-12
+## MCU -> WiFi replies
 
-### Short ACK
+### `A5-12` short ACK
 
-Most commands return short ACK:
+Most accepted commands return short ACK:
 
-  A5 12 <same_id> 04 00 <checksum> 01 <reg_lo> <reg_hi> 00
+```text
+A5 12 <same_id> 04 00 <checksum> 01 <reg_lo> <reg_hi> 00
+```
 
 Examples:
-  Command payload: 01 00 A0 00 01
-  Reply payload:   01 00 A0 00
 
-  Command payload: 01 03 A0 00 01 64
-  Reply payload:   01 03 A0 00
+```text
+Command payload: 01 00 A0 00 01       Reply payload: 01 00 A0 00
+Command payload: 01 03 A0 00 01 64    Reply payload: 01 03 A0 00
+Command payload: 01 60 A2 00 00 01 09 Reply payload: 01 60 A2 00
+```
 
-  Command payload: 01 60 A2 00 00 01 09
-  Reply payload:   01 60 A2 00
-
-### Full status reply
+### `A5-12` full status reply
 
 Request:
-  WiFi -> MCU:
-    01 84 40 00
+
+```text
+WiFi -> MCU: 01 84 40 00
+```
 
 MCU reply:
-  A5-12 with len=20:
-    01 84 40 00 0D 00 01 <status-like fields...>
+
+```text
+A5-12 with len=20: 01 84 40 00 0D 00 01 ...
+```
 
 Useful for startup sync.
 
+### `A5-52` NACK / rejected command or value
 
-## STARTUP / COLD BOOT BEHAVIOR
+Observed when sending unsupported display intermediate values:
+
+```text
+WiFi -> MCU: 01 05 A1 00 4B
+MCU -> WiFi: A5 52 <same_id> 04 00 <checksum> 01 05 A1 34
+```
+
+Working interpretation:
+
+```text
+A5-52 = NACK / error / rejected command value
+0x34   = observed error code for unsupported display level/range
+```
+
+Valid display values `0x00` and `0x64` return normal `A5-12` ACK.
+Night light intermediate values `0x00..0x64` return normal `A5-12` ACK.
+
+## Startup / cold boot behavior
 
 Observed after mains power is applied:
 
-1. WiFi module sends:
-   01 6A A2 00 00
-   Meaning: timer icon OFF
+1. WiFi module sends `01 6A A2 00 00` meaning timer icon OFF.
+2. WiFi module sends `01 84 40 00` meaning request full status.
+3. MCU replies with `A5-12` full status.
+4. WiFi module sends several `01 29 A1` startup sync variants:
 
-2. WiFi module sends:
-   01 84 40 00
-   Meaning: request full status
+```text
+01 29 A1 00 00 4B 00 4B 00 00
+01 29 A1 00 00 7D 00 7D 00 00
+01 29 A1 00 01 7D 00 7D 00 00
+```
 
-3. MCU replies with A5-12 full status.
+5. MCU emits `A5-02 STATUS`.
 
-4. WiFi module sends several 01 29 A1 startup sync variants:
-   01 29 A1 00 00 4B 00 4B 00 00
-   01 29 A1 00 00 7D 00 7D 00 00
-   01 29 A1 00 01 7D 00 7D 00 00
+Physical button behavior: when the user presses the physical power button, there may be no WiFi->MCU command. MCU changes state internally and sends `A5-02 STATUS`. Replacement ESP must always listen for MCU-generated state changes.
 
-5. MCU emits A5-02 STATUS.
-
-Physical button behavior:
-  When user presses the physical power button, there may be no WiFi->MCU command.
-  MCU changes state internally and sends A5-02 STATUS.
-  Replacement ESP must always listen for MCU-generated state changes.
-
-
-## RECOMMENDED INIT FOR REPLACEMENT ESP
+## Recommended init for replacement ESP
 
 Minimum startup sequence:
 
-  1. Init UART 9600 8N1.
-  2. Start A5 parser.
-  3. nextPacketId = 1 or any uint8 counter.
-  4. Send timer icon OFF:
-       01 6A A2 00 00
-  5. Send request full status:
-       01 84 40 00
-  6. Wait for A5-12 status reply and/or A5-02 status.
-  7. Publish state to HA/MQTT/web.
-  8. Keep listening permanently because physical panel buttons are handled by MCU.
+1. Init UART `9600 8N1`.
+2. Start A5 parser.
+3. `nextPacketId = 1` or any uint8 counter.
+4. Send timer icon OFF: `01 6A A2 00 00`.
+5. Send request full status: `01 84 40 00`.
+6. Wait for `A5-12` status reply and/or `A5-02 STATUS`.
+7. Publish state to HA/MQTT/web.
+8. Keep listening permanently because physical panel buttons are handled by MCU.
 
-Mode switch recommendation:
-  To match stock WiFi behavior, send sync preamble before mode commands:
+Mode switch recommendation: to match stock WiFi behavior, send sync preamble before mode commands:
 
-  01 29 A1 00 01 00 00 00 00 00
+```text
+01 29 A1 00 01 00 00 00 00 00
+```
 
 Then send one of:
 
-  Manual:
-    01 60 A2 00 00 01 xx
+```text
+Manual: 01 60 A2 00 00 01 XX
+Auto:   01 80 40 00 TT LL HH 09 05 01
+Sleep:  01 82 40 00 TT LL HH 09 05 01
+```
 
-  Auto:
-    01 80 40 00 TT LL HH 09 05 01
-
-  Sleep:
-    01 82 40 00 TT LL HH 09 05 01
-
-
-## COMMAND FRAME BUILD EXAMPLE
+## Command frame build example
 
 Pseudo C/C++:
 
-  uint8_t nextPacketId = 1;
+```cpp
+uint8_t nextPacketId = 1;
 
-  void sendA5Command(const uint8_t* payload, uint16_t len) {
-    uint8_t frame[64];
-    uint8_t id = nextPacketId++;
+void sendA5Command(const uint8_t *payload, uint16_t len) {
+  uint8_t frame[64];
+  uint8_t id = nextPacketId++;
 
-    frame[0] = 0xA5;
-    frame[1] = 0x22;
-    frame[2] = id;
-    frame[3] = len & 0xFF;
-    frame[4] = len >> 8;
-    frame[5] = 0x00; // checksum placeholder
+  frame[0] = 0xA5;
+  frame[1] = 0x22;
+  frame[2] = id;
+  frame[3] = len & 0xFF;
+  frame[4] = len >> 8;
+  frame[5] = 0x00;  // checksum placeholder
 
-    memcpy(&frame[6], payload, len);
+  memcpy(&frame[6], payload, len);
 
-    uint16_t total = len + 6;
-    uint16_t sum = 0;
+  uint16_t total = len + 6;
+  uint16_t sum = 0;
 
-    for (int i = 0; i < total; i++) {
-      if (i != 5) sum += frame[i];
-    }
-
-    frame[5] = 0xFF - (sum & 0xFF);
-
-    uart_write_bytes(UART_NUM_1, (const char*)frame, total);
+  for (int i = 0; i < total; i++) {
+    if (i != 5) sum += frame[i];
   }
+
+  frame[5] = 0xFF - (sum & 0xFF);
+
+  uart_write_bytes(UART_NUM_1, (const char *) frame, total);
+}
+```
 
 Example payloads:
 
-  const uint8_t powerOn[]      = {0x01,0x00,0xA0,0x00,0x01};
-  const uint8_t powerOff[]     = {0x01,0x00,0xA0,0x00,0x00};
-  const uint8_t displayOn[]    = {0x01,0x05,0xA1,0x00,0x64};
-  const uint8_t displayOff[]   = {0x01,0x05,0xA1,0x00,0x00};
-  const uint8_t timerIconOff[] = {0x01,0x6A,0xA2,0x00,0x00};
-  const uint8_t requestStatus[]= {0x01,0x84,0x40,0x00};
+```cpp
+const uint8_t powerOn[]          = {0x01,0x00,0xA0,0x00,0x01};
+const uint8_t powerOff[]         = {0x01,0x00,0xA0,0x00,0x00};
+const uint8_t displayOn[]        = {0x01,0x05,0xA1,0x00,0x64};
+const uint8_t displayOff[]       = {0x01,0x05,0xA1,0x00,0x00};
+const uint8_t nightLight70[]     = {0x01,0x03,0xA0,0x00,0x01,0x46};
+const uint8_t timerIconOff[]     = {0x01,0x6A,0xA2,0x00,0x00};
+const uint8_t requestStatus[]    = {0x01,0x84,0x40,0x00};
+const uint8_t stopAtTargetOn[]   = {0x01,0xE5,0xA5,0x00,0x01};
+const uint8_t stopAtTargetOff[]  = {0x01,0xE5,0xA5,0x00,0x00};
+```
 
+## Remaining unknown / not fully closed
 
-## REMAINING UNKNOWN / NOT FULLY CLOSED
+1. `STATUS p[0]..p[6]`: mostly constant/service prefix: `01 85 40 00 0D 00 01`. Useful to log, not necessary for user-level control.
+2. `STATUS p[19]`: usually `0x00`, reserved/unused/unknown.
+3. Exact meaning of all `01 29 A1` variants. Mode-change sync is understood practically. Startup variants are not fully understood.
+4. Whether the `01 29 A1` preamble is strictly required. Stock module sends it before mode changes. MVP replacement firmware should copy stock behavior first; later test if it can be omitted.
+5. `A5-52` / `0x34` exact error semantics. Observed as rejected display intermediate values; broader error-code map is not known.
 
-1. STATUS p10
-   Current safe name: p10_raw or readyFlag candidate.
-   Do not use it as power, water, tank, or mist output.
+## Short command summary
 
-2. STATUS p00-p06
-   Mostly constant/service prefix:
-     01 85 40 00 0D 00 01
-   Useful to log, not necessary for user-level control.
-
-3. STATUS p15
-   Usually 0x16. Probably constant/separator.
-
-4. STATUS p19
-   Usually 0x00. Reserved/unused.
-
-5. Exact meaning of all 01 29 A1 variants
-   Mode-change sync is understood practically.
-   Startup variants are not fully understood.
-
-6. Whether 01 29 A1 preamble is strictly required
-   Stock module sends it before mode changes.
-   MVP should copy stock behavior first; later test if it can be omitted.
-
-
-## SHORT COMMAND SUMMARY
-
+```text
 Power:
   01 00 A0 00 00 = OFF
   01 00 A0 00 01 = ON
 
-Night light:
-  01 03 A0 00 01 00 = OFF
-  01 03 A0 00 01 32 = LOW
-  01 03 A0 00 01 64 = HIGH
-
 Display:
   01 05 A1 00 00 = OFF
   01 05 A1 00 64 = ON
+  Intermediate values rejected with A5-52 / payload 01 05 A1 34
+
+Night light brightness:
+  01 03 A0 00 01 XX = brightness 0..100%, XX = 0x00..0x64
+  Presets used by stock app:
+    01 03 A0 00 01 00 = OFF / 0%
+    01 03 A0 00 01 32 = LOW / 50%
+    01 03 A0 00 01 64 = HIGH / 100%
 
 Timer icon:
   01 6A A2 00 00 = OFF
@@ -673,7 +759,7 @@ Timer icon:
 
 Manual:
   01 29 A1 00 01 00 00 00 00 00 = mode sync/preamble
-  01 60 A2 00 00 01 xx          = manual level xx
+  01 60 A2 00 00 01 XX          = manual level XX, likely 0x01..0x09
 
 Auto:
   01 29 A1 00 01 00 00 00 00 00 = mode sync/preamble
@@ -681,7 +767,7 @@ Auto:
 
 Sleep:
   01 29 A1 00 01 00 00 00 00 00 = mode sync/preamble
-  01 82 40 00 TT LL HH 09 05 01 = sleep target/band
+  01 82 40 00 TT LL HH 09 05 01 = sleep mode using target/band
 
 Stop at target / Auto-off:
   01 E5 A5 00 00 = OFF, keep minimum/maintain
@@ -692,3 +778,4 @@ Request status:
 
 Sync/internal:
   01 29 A1 ... = sync/mode preamble/internal state
+```
