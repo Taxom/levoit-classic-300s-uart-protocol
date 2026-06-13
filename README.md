@@ -4,23 +4,24 @@ Reverse-engineered notes for the `A5` UART protocol used between the main MCU an
 
 This repository is intended to help with replacement WiFi/ESP firmware, local-control experiments, and Home Assistant / MQTT integrations.
 
-> Status: draft, based on UART sniffing. Confirmed commands are documented separately from unknown or candidate fields.
+> Status: draft, based on UART sniffing and active-controller tests. Confirmed commands are documented separately from unknown or candidate fields.
 
 ## What is documented
 
 - UART framing: `9600 8N1`, frame header, packet type, payload length, checksum.
 - Known frame types:
-  - `A5-22`: WiFi module → MCU command
-  - `A5-12`: MCU → WiFi reply / ACK
-  - `A5-02`: MCU → WiFi status / event status
+  - `A5-22`: WiFi module -> MCU command
+  - `A5-12`: MCU -> WiFi reply / ACK
+  - `A5-02`: MCU -> WiFi status / event status
+  - `A5-52`: MCU -> WiFi NACK / rejected command or value, observed during invalid display-brightness tests
 - Confirmed commands:
   - power on/off
-  - display on/off
-  - night light off/low/high
+  - display on/off, binary only
+  - night light brightness `0..100%`
   - timer icon on/off
   - manual mist level
   - auto mode target humidity band
-  - sleep 
+  - sleep mode using the current/commanded target humidity band
   - stop-at-target / auto-off behavior
   - full status request
 - 20-byte status payload map.
@@ -59,12 +60,11 @@ checksum = 0xFF - (sum(all bytes except checksum) & 0xFF)
 
 ## Important notes
 
-This is not official Levoit or VeSync documentation. It is a working map recovered from captured UART logs.
+This is not official Levoit or VeSync documentation. It is a working map recovered from captured UART logs and active replacement-controller tests.
 
 Unknown fields are intentionally left as `UNKNOWN` or `candidate`. Do not treat those fields as stable until they are confirmed by additional tests.
 
 Physical front-panel button changes may be generated internally by the MCU and reported as status packets. Replacement firmware must keep listening for MCU-generated `A5-02` status packets even when it did not send a command.
-
 
 ## License
 
