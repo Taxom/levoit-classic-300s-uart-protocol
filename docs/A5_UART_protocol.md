@@ -529,7 +529,7 @@ Decoded:
 
 ```text
 power=ON
-thank=installed
+tank=installed
 water=OK
 stopAtTarget=ON
 display=ON
