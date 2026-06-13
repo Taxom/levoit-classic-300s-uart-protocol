@@ -20,7 +20,7 @@ This repository is intended to help with replacement WiFi/ESP firmware, local-co
   - timer icon on/off
   - manual mist level
   - auto mode target humidity band
-  - sleep mode target humidity band
+  - sleep 
   - stop-at-target / auto-off behavior
   - full status request
 - 20-byte status payload map.
