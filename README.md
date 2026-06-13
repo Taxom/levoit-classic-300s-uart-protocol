@@ -66,7 +66,7 @@ Unknown fields are intentionally left as `UNKNOWN` or `candidate`. Do not treat 
 Physical front-panel button changes may be generated internally by the MCU and reported as status packets. Replacement firmware must keep listening for MCU-generated `A5-02` status packets even when it did not send a command.
 
 
-License
+## License
 
 This repository contains reverse-engineered protocol documentation and illustrative examples. It is not intended to be a software library.
 
