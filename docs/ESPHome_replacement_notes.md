@@ -4,9 +4,11 @@ These notes summarize the replacement-controller tests performed for the Levoit 
 
 This file is not required to understand the protocol, but it records practical implementation details that were useful for replacing the original WiFi/ESP module.
 
-## Tested hardware
+> This repository documents the protocol and hardware notes. It does not currently include ready-to-flash ESPHome YAML files or firmware binaries.
 
-### External test controller
+## Tested hardware variants
+
+### External diagnostic controller
 
 ```text
 Board: ESP32-C3 Super Mini
@@ -27,20 +29,22 @@ External 3.3 V controllers must use level shifting or other input protection.
 
 During diagnostics, the external ESP32-C3 was connected through a transistor level shifter. Directly connecting the humidifier MCU TX line from the MCU-board header to a 3.3 V ESP RX pin is not recommended.
 
-### Original module replacement
+### Original ESP32-SOLO module replacement
 
-The original WiFi module in this tested unit uses an ESP32 single-core module.
+The original WiFi module in the first tested unit uses an ESP32 single-core module.
 
 ```text
 Chip detected by esptool: ESP32-S0WD revision v1.0
-Original module class:    ESP32-SOLO-1C / single-core ESP32
-Flash size:               4 MB
-MAC:                       device-specific, omitted
+Original module class: ESP32-SOLO-1C / single-core ESP32
+Flash size: 4 MB
+MAC: device-specific, omitted
 ```
 
-Important: the original ESP32-SOLO module board is not just an ESP32 module. In the tested unit it also provides the interface electronics between the 5 V MCU-board header and the 3.3 V ESP32-SOLO GPIOs. If replacing this board with a different ESP board, replicate the required level shifting/protection.
+Important: the original ESP32-SOLO module board is not just an ESP32 module. In the tested unit it also provides the interface electronics between the 5 V MCU-board header and the 3.3 V ESP32-SOLO GPIOs.
 
-Working UART pins on the original ESP32-SOLO module:
+If replacing this board with a different ESP board, replicate the required level shifting/protection.
+
+Working A5 UART pins on the original ESP32-SOLO module:
 
 ```text
 ESP32 GPIO16 = RX from humidifier MCU TX
@@ -51,36 +55,15 @@ UART: 9600 8N1
 Flashing/backup UART:
 
 ```text
-ESP32 GPIO3  = U0RXD <- USB-UART TX
-ESP32 GPIO1  = U0TXD -> USB-UART RX
-GPIO0        = BOOT strap low for UART bootloader mode
-EN/RST       = reset
-GND          = common ground
+ESP32 GPIO3 = U0RXD <- USB-UART TX
+ESP32 GPIO1 = U0TXD -> USB-UART RX
+GPIO0       = BOOT strap low for UART bootloader mode
+EN/RST      = reset
+GND         = common ground
 3.3V only
 ```
 
-## Original firmware backup
-
-Before replacing the original firmware, make a private full-flash backup of the original ESP32-SOLO module. Do **not** publish this backup: the flash image may contain device-specific data such as WiFi credentials, tokens, calibration/NVS data, MAC-related records, and pairing/provisioning state.
-
-For a 4 MB flash chip, read the full image twice and compare the files:
-
-```powershell
-python -m esptool --chip esp32 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_1.bin
-python -m esptool --chip esp32 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_2.bin
-cmd /c fc /b backup_1.bin backup_2.bin
-Get-FileHash .\backup_1.bin -Algorithm SHA256
-```
-
-A correct full backup for a 4 MB module should be 4,194,304 bytes. The SHA256 value is intentionally not documented here because it is device-specific and not useful to other users.
-
-Note: repeated backups may differ if the stock firmware boots between reads and updates the NVS/WiFi area. A stable backup can be produced by keeping the chip in bootloader mode and using `--before no-reset --after no-reset` for repeated reads.
-
-## ESPHome build notes for ESP32-SOLO
-
-The ESP32-SOLO is single-core. The tested ESPHome build used ESP-IDF and unicore configuration.
-
-Example ESPHome `esp32:` block:
+Example ESPHome `esp32:` block used for the ESP32-SOLO variant:
 
 ```yaml
 esp32:
@@ -93,7 +76,7 @@ esp32:
       CONFIG_FREERTOS_UNICORE: y
 ```
 
-UART:
+Example A5 UART block:
 
 ```yaml
 uart:
@@ -103,95 +86,200 @@ uart:
   baud_rate: 9600
 ```
 
-Tested firmware size was approximately half of the default 4 MB OTA app slot.
+### Newer ESP32-C3-SOLO-1 module replacement
+
+A newer Levoit Classic 300S unit was observed with an ESP32-C3-SOLO-1 module instead of ESP32-SOLO-1C.
+
+Observed `esptool flash-id` information:
+
+```text
+Chip type: ESP32-C3 (QFN32) revision v0.4
+Features: Wi-Fi, BT 5 (LE), Single Core, 160 MHz, Embedded Flash 4 MB (XMC)
+Crystal: 40 MHz
+Flash size: 4 MB
+MAC: device-specific, omitted
+```
+
+The carrier board layout appeared equivalent to the ESP32-SOLO version, but the module pin mapping differs because the module itself is ESP32-C3.
+
+Working A5 UART pins on the ESP32-C3-SOLO-1 module:
+
+```text
+ESP32-C3 GPIO18 = RX from humidifier MCU TX
+ESP32-C3 GPIO19 = TX to humidifier MCU RX
+UART: 9600 8N1
+```
+
+Observed mapping basis:
+
+```text
+Old ESP32-SOLO board connection:
+  module pin 27 -> GPIO16
+  module pin 28 -> GPIO17
+
+New ESP32-C3-SOLO-1 board connection:
+  module pin 27 -> GPIO18
+  module pin 28 -> GPIO19
+```
+
+Flashing/backup UART for ESP32-C3:
+
+```text
+ESP32-C3 GPIO20 = U0RXD <- USB-UART TX
+ESP32-C3 GPIO21 = U0TXD -> USB-UART RX
+ESP32-C3 GPIO9  = BOOT strap low for UART bootloader mode
+EN/RST          = reset
+GND             = common ground
+3.3V only
+```
+
+Example ESPHome `esp32:` block used for the ESP32-C3-SOLO-1 variant:
+
+```yaml
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+```
+
+Example A5 UART block:
+
+```yaml
+uart:
+  id: a5_uart_bus
+  rx_pin: GPIO18
+  tx_pin: GPIO19
+  baud_rate: 9600
+```
+
+ESPHome may warn that GPIO18/GPIO19 are used by the ESP32-C3 USB-Serial-JTAG interface. In this module installation they are used as GPIO/UART pins to the humidifier MCU, while flashing/logging is done through UART0 on GPIO20/GPIO21. This warning is expected for this design.
+
+## Original firmware backup
+
+Before replacing the original firmware, make a private full-flash backup of the original ESP module.
+
+Do **not** publish this backup: the flash image may contain device-specific data such as WiFi credentials, tokens, calibration/NVS data, MAC-related records, and pairing/provisioning state.
+
+For a 4 MB ESP32-SOLO flash chip, read the full image twice and compare the files:
+
+```powershell
+python -m esptool --chip esp32 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_1.bin
+python -m esptool --chip esp32 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_2.bin
+cmd /c fc /b backup_1.bin backup_2.bin
+Get-FileHash .\backup_1.bin -Algorithm SHA256
+```
+
+For a 4 MB ESP32-C3 flash chip, use `--chip esp32c3`:
+
+```powershell
+python -m esptool --chip esp32c3 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_1.bin
+python -m esptool --chip esp32c3 --port COMx --baud 460800 --before no-reset --after no-reset read-flash 0x000000 0x400000 backup_2.bin
+cmd /c fc /b backup_1.bin backup_2.bin
+Get-FileHash .\backup_1.bin -Algorithm SHA256
+```
+
+A correct full backup for a 4 MB module should be:
+
+```text
+4,194,304 bytes
+```
+
+The SHA256 value is intentionally not documented here because it is device-specific and not useful to other users.
+
+Note: repeated backups may differ if the stock firmware boots between reads and updates the NVS/WiFi area. A stable backup can be produced by keeping the chip in bootloader mode and using `--before no-reset --after no-reset` for repeated reads.
+
+## ESPHome entity design notes
+
+### Stop At Target vs Target Stop Active
+
+Do not bind the `Stop At Target` switch directly to STATUS `p[10]`.
+
+Updated interpretation:
+
+```text
+Stop At Target command:
+  01 E5 A5 00 00 = behavior OFF
+  01 E5 A5 00 01 = behavior ON
+
+STATUS p[10]:
+  0 = target stop is not currently active
+  1 = MCU is currently inhibiting/stopping output due to target condition
+```
+
+Recommended ESPHome/HA design:
+
+```text
+Stop At Target
+  command/desired behavior switch, preferably optimistic or preference-backed
+
+Target Stop Active
+  binary sensor from p[10]
+  shows the actual MCU output-inhibit state
+```
+
+This avoids the misleading UI state where the command behavior is enabled, but the humidifier has not yet reached the humidity threshold.
+
+### Error field
+
+Expose `p[19]` as a diagnostic text sensor.
+
+Recommended mapping:
+
+```text
+0x00 = OK
+0x01 = E1, observed; likely tank Hall sensor / tank-presence fault
+0x02 = E2 candidate / unconfirmed
+other = UNKNOWN(0xXX)
+```
+
+### Tank and water text states
+
+The following user-facing naming was found clearer than alarm-style naming:
+
+```text
+Tank:  installed / removed
+Water: OK / empty
+```
+
+Instead of:
+
+```text
+Tank Removed: OK / problem
+Water Empty: OK / problem
+```
+
+### Mode selection
+
+A single select/dropdown is preferred over separate mode buttons:
+
+```text
+Mode: AUTO / MANUAL / SLEEP
+```
+
+This avoids clutter and prevents separate mode-button entities from creating meaningless history graphs.
 
 ## Recovery behavior implemented in the tested ESPHome replacement
 
 The MCU reports physical power-button long-press events as short `A5-02 len=5` packets.
 
-Implemented/tested replacement behavior:
+Replacement behavior tested:
 
 ```text
-01 02 D1 00 02 = 5-second hold threshold
-                 arm pending reboot, but do not reboot yet
+5-second hold threshold + release event:
+  reboot ESP / reconnect WiFi
 
-01 02 D1 00 03 = release after 5-second hold
-                 reboot ESP
-
-01 03 D1 00 04 = 15-second hold threshold
-                 cancel pending reboot and start recovery AP
+15-second hold threshold:
+  start ESP recovery AP
 ```
 
-Tested recovery AP:
+This uses the existing humidifier front-panel power button and does not require adding a separate physical recovery button to the ESP module.
 
-```text
-SSID: Levoit-Classic300S-Recovery
-IP:   192.168.4.1
-```
+## mDNS / hostname note
 
-Confirmed OTA paths on the original ESP32-SOLO module:
+The device can work normally in Home Assistant even if `.local` name resolution is broken on some clients, provided the IP address is reachable and the ESPHome native API connection works.
 
-```text
-Normal WiFi OTA:
-  esphome upload levoit_classic300s_solo.yaml --device <normal_ip>
+If `.local` does not resolve but the device works by IP, the issue is likely network/mDNS/DNS behavior rather than the UART replacement logic.
 
-Recovery AP OTA:
-  15s hold -> connect to Levoit-Classic300S-Recovery
-  esphome upload levoit_classic300s_solo.yaml --device 192.168.4.1
-```
-
-## Replacement-firmware behavior recommendations
-
-### Always listen to MCU-generated state changes
-
-The physical front-panel button is handled by the MCU. The MCU may change state and send `A5-02` STATUS without any WiFi/ESP command.
-
-Replacement firmware should treat `A5-02` STATUS as authoritative.
-
-### Startup sequence
-
-Recommended minimal sequence:
-
-```text
-1. Init UART 9600 8N1.
-2. Start A5 parser.
-3. Send timer icon OFF: 01 6A A2 00 00
-4. Send request full status: 01 84 40 00
-5. Decode A5-12 status reply and/or A5-02 full STATUS.
-6. Publish state to HA/MQTT/web.
-```
-
-### Mode switching
-
-To match stock behavior:
-
-```text
-1. Send mode-sync preamble:
-   01 29 A1 00 01 00 00 00 00 00
-
-2. Then send one of:
-   Manual: 01 60 A2 00 00 01 xx
-   Auto:   01 80 40 00 TT LL HH 09 05 01
-   Sleep:  01 82 40 00 TT LL HH 09 05 01
-```
-
-If the device is power OFF and the user requests a mode command, the tested replacement firmware first sends power ON, then sends sync + mode command.
-
-### Water empty
-
-When water-empty alarm is active, mist-related commands may be rejected with `A5-52` code `0x14`.
-
-The tested replacement firmware skips mist-related mode/level commands while `water_empty` is active.
-
-### Tank removed
-
-Tank removed is an output interlock, not a command interlock.
-
-The MCU accepts mode/manual-level commands while the tank is removed, but keeps actual mist output OFF. When the tank is installed again, output may resume using the stored mode/level.
-
-### Manual level cache
-
-In MANUAL mode, `p[17]` is selected manual level.  
-In AUTO/SLEEP, `p[17]` is an output state/level, not the saved manual setting.
-
-Replacement firmware should store/update manual level only when `p[16] == 0x01` (MANUAL).
+A normal DNS name such as `levoit-classic300s.home.arpa` can be used if managed by the local DNS server.
