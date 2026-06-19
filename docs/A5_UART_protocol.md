@@ -1,6 +1,7 @@
 # A5 UART protocol notes for Levoit Classic 300S MCU / WiFi-module replacement
 
-Version: draft 2026-06-14  
+Version: draft 2026-06-16
+
 Purpose: packet/status/control description recovered from UART sniffing and active replacement-controller tests.
 
 ## IMPORTANT
@@ -11,25 +12,33 @@ This is a working protocol map from captured logs. Most user-facing commands are
 
 ```text
 Baud rate: 9600
-Format:    8N1, no flow control
-
+Format: 8N1, no flow control
 Logical directions:
   WiFi/ESP -> MCU : control commands
   MCU -> WiFi/ESP : replies, full status packets, and short events
 ```
 
-Tested original-module replacement UART pins:
+Tested original ESP32-SOLO replacement UART pins:
 
 ```text
 Original ESP32-SOLO-1C GPIO16 = UART RX from humidifier MCU TX
 Original ESP32-SOLO-1C GPIO17 = UART TX to humidifier MCU RX
 ```
 
+Tested newer ESP32-C3-SOLO-1 replacement UART pins:
+
+```text
+ESP32-C3-SOLO-1 GPIO18 = UART RX from humidifier MCU TX
+ESP32-C3-SOLO-1 GPIO19 = UART TX to humidifier MCU RX
+```
+
 ### Electrical level warning
 
-In the tested unit, the header on the humidifier MCU board carries 5 V power and 5 V UART logic levels. The level conversion/protection is on the original WiFi/ESP module board, not on the MCU header itself.
+In the tested unit, the header on the humidifier MCU board carries 5 V power and 5 V UART logic levels.
 
-Therefore, if an external ESP32/ESP32-C3/ESP8266 or other 3.3 V controller is connected in place of the original ESP32-SOLO module, the UART lines must be level-shifted or otherwise protected. Do not connect a 3.3 V ESP RX pin directly to the MCU-board 5 V UART TX line.
+The level conversion/protection is on the original WiFi/ESP module board, not on the MCU header itself. Therefore, if an external ESP32/ESP32-C3/ESP8266 or other 3.3 V controller is connected in place of the original ESP module board, the UART lines must be level-shifted or otherwise protected.
+
+Do not connect a 3.3 V ESP RX pin directly to the MCU-board 5 V UART TX line.
 
 The external ESP32-C3 diagnostic controller used during reverse engineering was connected through a transistor level shifter.
 
@@ -87,7 +96,7 @@ Packet id notes:
 The following sections list **payload only**. A full command frame is:
 
 ```text
-A5 22 <id> <len_lo> <len_hi> <checksum> <payload...>
+A5 22 <id> <len-lo> <len-hi> <checksum> <payload...>
 ```
 
 ### 1. Power / main switch
@@ -141,7 +150,9 @@ p[18] = night light brightness
 01 05 A1 00 64 = display ON / brightness 100%
 ```
 
-Confirmed: display appears binary. Intermediate values tested were rejected.
+Confirmed: display appears binary through the stock MCU UART protocol.
+
+Intermediate values tested were rejected.
 
 Observed rejected examples:
 
@@ -159,6 +170,8 @@ p[11] = display brightness/state
   0x64 = display ON / 100%
 ```
 
+Hardware note: the AiP650E display/key controller appears to support hardware brightness control, but the stock MCU UART protocol currently exposes only binary display ON/OFF.
+
 ### 4. Timer indicator / timer icon
 
 ```text
@@ -172,14 +185,14 @@ Observed timer behavior:
 
 ```text
 When timer starts:
-  WiFi/ESP -> MCU: 01 6A A2 00 01    // show timer icon
+  WiFi/ESP -> MCU: 01 6A A2 00 01  // show timer icon
 
 When timer expires:
-  WiFi/ESP -> MCU: 01 00 A0 00 01    // power ON, for ON timer
+  WiFi/ESP -> MCU: 01 00 A0 00 01  // power ON, for ON timer
   OR
-  WiFi/ESP -> MCU: 01 00 A0 00 00    // power OFF, for OFF timer
+  WiFi/ESP -> MCU: 01 00 A0 00 00  // power OFF, for OFF timer
 
-  WiFi/ESP -> MCU: 01 6A A2 00 00    // hide timer icon
+  WiFi/ESP -> MCU: 01 6A A2 00 00  // hide timer icon
 ```
 
 For replacement firmware: implement timer duration on the ESP side. Use the MCU only for timer icon and final power command.
@@ -282,6 +295,7 @@ p[13] = target humidity
 p[14] = current humidity
 p[17] = auto output state/level
 p[12] = actual mist/output active
+p[10] = target stop active / output inhibited by target condition
 ```
 
 ### 7. Sleep mode / sleep humidity band
@@ -312,49 +326,61 @@ p[13] = target humidity
 p[14] = current humidity
 p[17] = sleep/auto output state/level
 p[12] = actual mist/output active
+p[10] = target stop active / output inhibited by target condition
 ```
 
-### 8. Stop at target / Auto-off behavior
+### 8. Stop at target / Auto-off behavior command
 
-App setting name: `auto-off`. Better protocol meaning: `stopAtTarget`.
+App setting name: `auto-off`.
+
+Practical protocol meaning: `Stop At Target` behavior.
 
 ```text
-01 E5 A5 00 00 = stopAtTarget OFF
-                 When target is reached/exceeded, do not fully stop;
-                 keep minimum/maintain output behavior.
+01 E5 A5 00 00 = Stop At Target behavior OFF
+                  When target is reached/exceeded, do not fully stop;
+                  keep minimum/maintain output behavior.
 
-01 E5 A5 00 01 = stopAtTarget ON
-                 When target is reached/exceeded, stop output.
+01 E5 A5 00 01 = Stop At Target behavior ON
+                  When target condition is active, stop output.
 ```
 
-This is **not** hysteresis. Hysteresis/band is set by:
+Important update: the 20-byte STATUS packet does **not** appear to expose the stored Stop At Target setting directly.
+
+The previously suspected field `p[10]` is better interpreted as:
+
+```text
+p[10] = Target Stop Active / output inhibited by target condition
+  0x00 = not currently stopped by target condition
+  0x01 = currently stopped/inhibited by target condition
+```
+
+This means the following states are valid and expected:
+
+```text
+Stop At Target behavior is ON, but humidity is below the upper threshold:
+  p[10] = 0
+  mist may remain ON
+
+Stop At Target behavior is ON and humidity is above the upper threshold:
+  p[10] = 1
+  mist is stopped/inhibited
+```
+
+Observed behavior confirming the new interpretation:
+
+```text
+Target 60%, humidity 56%, Stop At Target command sent:
+  p[10]=0, mist=ON
+
+Target later lowered to 45%, humidity 57%:
+  p[10]=1, mist=OFF
+```
+
+This is distinct from the hysteresis/band itself, which is set by:
 
 ```text
 01 80 40 00 TT LL HH 09 05 01
 01 82 40 00 TT LL HH 09 05 01
-```
-
-Observed with target below current humidity:
-
-```text
-stopAtTarget OFF -> p[10]=0, p[12]=1, p[17]=1
-stopAtTarget ON  -> p[10]=1, p[12]=0, p[17]=0
-```
-
-Related STATUS field:
-
-```text
-p[10] = StopAtTarget / Auto-off setting flag, very likely confirmed by behavior
-  0x00 = disabled / keep minimum
-  0x01 = enabled / stop output at target
-```
-
-Important distinction:
-
-```text
-p[10] = setting/behavior flag
-p[12] = actual mist/output active
-p[17] = selected level or current mode output state/level
 ```
 
 ### 9. Request full status
@@ -381,8 +407,8 @@ Main observed sync/preamble command:
 
 Observed:
 
-- before Auto → Manual
-- before Manual → Auto
+- before Auto -> Manual
+- before Manual -> Auto
 - before Auto/Manual/Sleep mode changes
 - MCU replies with short ACK: `01 29 A1 00`
 
@@ -406,7 +432,9 @@ Exact meaning: `UNKNOWN`. Likely startup/internal sync or state restore after ma
 
 ## STATUS packets, MCU -> WiFi/ESP, `A5-02`
 
-`A5-02` is not always a full 20-byte status. Observed forms:
+`A5-02` is not always a full 20-byte status.
+
+Observed forms:
 
 ```text
 A5-02 len=20 = full STATUS payload
@@ -430,30 +458,35 @@ p00 p01 p02 p03 p04 p05 p06 p07 p08 p09 p10 p11 p12 p13 p14 p15 p16 p17 p18 p19
 ### Full STATUS payload map
 
 ```text
-p[0]  = 0x01, UNKNOWN / constant
-p[1]  = 0x85, UNKNOWN / status object id candidate
-        Note: A5-12 full status reply to 01 84 40 uses 0x84 instead of 0x85.
-p[2]  = 0x40, UNKNOWN / object id part candidate
-p[3]  = 0x00, UNKNOWN / constant
-p[4]  = 0x0D, UNKNOWN / constant
-p[5]  = 0x00, UNKNOWN / constant
-p[6]  = 0x01, UNKNOWN / constant
+p[0] = 0x01, UNKNOWN / constant
 
-p[7]  = Power / main power state
-        0x00 = OFF
-        0x01 = ON
+p[1] = 0x85, UNKNOWN / status object id candidate
+       Note: A5-12 full status reply to 01 84 40 uses 0x84 instead of 0x85.
 
-p[8]  = Tank removed
-        0x00 = tank installed
-        0x01 = tank removed
+p[2] = 0x40, UNKNOWN / object id part candidate
+p[3] = 0x00, UNKNOWN / constant
+p[4] = 0x0D, UNKNOWN / constant
+p[5] = 0x00, UNKNOWN / constant
+p[6] = 0x01, UNKNOWN / constant
 
-p[9]  = Water empty / low water alarm
-        0x00 = water OK
-        0x01 = water empty / low
+p[7] = Power / main power state
+       0x00 = OFF
+       0x01 = ON
 
-p[10] = StopAtTarget / Auto-off setting flag, very likely
-        0x00 = disabled / keep minimum
-        0x01 = enabled / stop output at target
+p[8] = Tank removed
+       0x00 = tank installed
+       0x01 = tank removed
+
+p[9] = Water empty / low water alarm
+       0x00 = water OK
+       0x01 = water empty / low
+
+p[10] = Target Stop Active / auto output inhibit
+        0x00 = not currently stopped by target condition
+        0x01 = currently stopped/inhibited by target condition
+
+        Important: this is not the stored Stop At Target setting itself.
+        It is an active state/result reported by the MCU.
 
 p[11] = Display brightness/state
         0x00 = display OFF
@@ -489,7 +522,13 @@ p[18] = Night light brightness
         0x64 = HIGH / 100%
         Other 0..100 custom values accepted/reported.
 
-p[19] = UNKNOWN / usually 0x00
+p[19] = Error / fault code candidate
+        0x00 = OK / no error
+        0x01 = E1 observed on the front-panel display;
+               likely tank Hall sensor / tank-presence fault,
+               observed while manipulating the tank magnet
+        0x02 = E2 candidate / unconfirmed
+        other = UNKNOWN / not yet decoded
 ```
 
 ### Confirmed STATUS behavior notes
@@ -534,9 +573,18 @@ In AUTO/SLEEP mode, p[17] is mode output state/level.
 Replacement firmware should not overwrite stored manual level from p[17] outside MANUAL mode.
 ```
 
+Target stop active:
+
+```text
+p[10] is an active/inhibited state, not a stored setting.
+For a replacement firmware UI, prefer:
+  - Stop At Target: command/desired behavior switch
+  - Target Stop Active: status/binary sensor from p[10]
+```
+
 ### STATUS examples
 
-Power ON, tank installed, water OK, display ON, auto mode, no mist, night light OFF:
+Power ON, tank installed, water OK, display ON, auto mode, target stop active, no mist, night light OFF:
 
 ```text
 01 85 40 00 0D 00 01 01 00 00 01 64 00 33 42 16 00 00 00 00
@@ -545,47 +593,55 @@ Power ON, tank installed, water OK, display ON, auto mode, no mist, night light 
 Decoded:
 
 ```text
-power=ON tank=installed water=OK stopAtTarget=ON display=ON
-mistOutput=OFF target=51% humidity=66% temp=22C mode=AUTO level=0 night=OFF
+power=ON tank=installed water=OK targetStopActive=ON display=ON mistOutput=OFF target=51% humidity=66% temp=22C mode=AUTO level=0 night=OFF error=OK
 ```
 
 Manual max, tank installed, water OK, mist visible:
 
 ```text
-01 85 40 00 0D 00 01 01 00 00 01 64 01 32 41 16 01 09 00 00
+01 85 40 00 0D 00 01 01 00 00 00 64 01 32 41 16 01 09 00 00
 ```
 
 Decoded:
 
 ```text
-power=ON tank=installed water=OK display=ON mistOutput=ON
-target=50% humidity=65% temp=22C mode=MANUAL selectedLevel=9 night=OFF
+power=ON tank=installed water=OK targetStopActive=OFF display=ON mistOutput=ON target=50% humidity=65% temp=22C mode=MANUAL selectedLevel=9 night=OFF error=OK
 ```
 
 Tank removed, water OK, manual max selected, output blocked:
 
 ```text
-01 85 40 00 0D 00 01 01 01 00 01 64 00 32 3F 16 01 09 00 00
+01 85 40 00 0D 00 01 01 01 00 00 64 00 32 3F 16 01 09 00 00
 ```
 
 Decoded:
 
 ```text
-power=ON tank=removed water=OK display=ON mistOutput=OFF
-mode=MANUAL selectedLevel=9
+power=ON tank=removed water=OK display=ON mistOutput=OFF mode=MANUAL selectedLevel=9 error=OK
 ```
 
 Water empty, power OFF:
 
 ```text
-01 85 40 00 0D 00 01 00 00 01 01 64 00 2D 42 16 01 05 00 00
+01 85 40 00 0D 00 01 00 00 01 00 64 00 2D 42 16 01 05 00 00
 ```
 
 Decoded:
 
 ```text
-power=OFF tank=installed water=EMPTY display=ON mistOutput=OFF
-target=45% humidity=66% temp=22C mode=MANUAL selectedLevel=5
+power=OFF tank=installed water=EMPTY display=ON mistOutput=OFF target=45% humidity=66% temp=22C mode=MANUAL selectedLevel=5 error=OK
+```
+
+Observed E1 / tank Hall sensor candidate:
+
+```text
+p[19] = 0x01
+```
+
+Decoded:
+
+```text
+error=E1, likely tank Hall sensor / tank-presence fault candidate
 ```
 
 ## Short MCU events, `A5-02 len=5`
@@ -628,7 +684,7 @@ Replacement ESPHome behavior tested in this project:
 Most commands return short ACK:
 
 ```text
-A5 12 <id> 04 00 <checksum> 01 <cmd_lo> <cmd_hi> 00
+A5 12 <id> 04 00 <checksum> 01 xx yy 00
 ```
 
 Examples:
@@ -644,6 +700,8 @@ Command payload: 01 60 A2 00 00 01 09
 Reply payload:   01 60 A2 00
 ```
 
+Important: ACK means the command was recognized at protocol level. It does not always mean that every user-visible state changed immediately.
+
 ### Full status reply
 
 Request:
@@ -655,8 +713,7 @@ WiFi/ESP -> MCU: 01 84 40 00
 MCU reply:
 
 ```text
-A5-12 with len=20:
-01 84 40 00 0D 00 01 ...
+A5-12 with len=20: 01 84 40 00 0D 00 01 ...
 ```
 
 Useful for startup sync.
@@ -666,7 +723,7 @@ Useful for startup sync.
 Observed format:
 
 ```text
-A5 52 <id> 04 00 <checksum> 01 <cmd_lo> <cmd_hi> <error_code>
+A5 52 <id> 04 00 <checksum> 01 xx yy <code>
 ```
 
 Known observed examples:
@@ -696,25 +753,24 @@ Observed after mains power is applied:
 
 1. WiFi module sends timer icon OFF:
 
-   ```text
-   01 6A A2 00 00
-   ```
+```text
+01 6A A2 00 00
+```
 
 2. WiFi module sends request full status:
 
-   ```text
-   01 84 40 00
-   ```
+```text
+01 84 40 00
+```
 
 3. MCU replies with `A5-12` full status.
-
 4. WiFi module sends several `01 29 A1` startup sync variants:
 
-   ```text
-   01 29 A1 00 00 4B 00 4B 00 00
-   01 29 A1 00 00 7D 00 7D 00 00
-   01 29 A1 00 01 7D 00 7D 00 00
-   ```
+```text
+01 29 A1 00 00 4B 00 4B 00 00
+01 29 A1 00 00 7D 00 7D 00 00
+01 29 A1 00 01 7D 00 7D 00 00
+```
 
 5. MCU emits `A5-02` STATUS.
 
@@ -735,15 +791,15 @@ Minimum startup sequence:
 3. `nextPacketId = 1` or any uint8 counter.
 4. Send timer icon OFF:
 
-   ```text
-   01 6A A2 00 00
-   ```
+```text
+01 6A A2 00 00
+```
 
 5. Send request full status:
 
-   ```text
-   01 84 40 00
-   ```
+```text
+01 84 40 00
+```
 
 6. Wait for `A5-12` status reply and/or `A5-02` status.
 7. Publish state to Home Assistant / MQTT / web UI.
@@ -772,8 +828,8 @@ uint8_t nextPacketId = 1;
 
 void sendA5Command(const uint8_t* payload, uint16_t len) {
   uint8_t frame[64];
-
   uint8_t id = nextPacketId++;
+
   frame[0] = 0xA5;
   frame[1] = 0x22;
   frame[2] = id;
@@ -788,21 +844,23 @@ void sendA5Command(const uint8_t* payload, uint16_t len) {
   for (int i = 0; i < total; i++) {
     if (i != 5) sum += frame[i];
   }
-
   frame[5] = 0xFF - (sum & 0xFF);
-  uart_write_bytes(UART_NUM_1, (const char*)frame, total);
+
+  uart_write_bytes(UART_NUM_1, (const char*) frame, total);
 }
 ```
 
 Example payloads:
 
 ```cpp
-const uint8_t powerOff[]      = {0x01,0x00,0xA0,0x00,0x00};
-const uint8_t powerOn[]       = {0x01,0x00,0xA0,0x00,0x01};
-const uint8_t displayOff[]    = {0x01,0x05,0xA1,0x00,0x00};
-const uint8_t displayOn[]     = {0x01,0x05,0xA1,0x00,0x64};
-const uint8_t timerIconOff[]  = {0x01,0x6A,0xA2,0x00,0x00};
-const uint8_t requestStatus[] = {0x01,0x84,0x40,0x00};
+const uint8_t powerOff[]        = {0x01,0x00,0xA0,0x00,0x00};
+const uint8_t powerOn[]         = {0x01,0x00,0xA0,0x00,0x01};
+const uint8_t displayOff[]      = {0x01,0x05,0xA1,0x00,0x00};
+const uint8_t displayOn[]       = {0x01,0x05,0xA1,0x00,0x64};
+const uint8_t timerIconOff[]    = {0x01,0x6A,0xA2,0x00,0x00};
+const uint8_t requestStatus[]   = {0x01,0x84,0x40,0x00};
+const uint8_t stopAtTargetOn[]  = {0x01,0xE5,0xA5,0x00,0x01};
+const uint8_t stopAtTargetOff[] = {0x01,0xE5,0xA5,0x00,0x00};
 ```
 
 ## Remaining unknown / not fully closed
@@ -811,13 +869,16 @@ const uint8_t requestStatus[] = {0x01,0x84,0x40,0x00};
    - Mostly constant/service prefix.
    - Useful to log, not necessary for user-level control.
 
-2. STATUS `p[10]`
-   - `stopAtTarget` interpretation is very likely confirmed by behavior.
-   - Official field name is unknown.
+2. Stored Stop At Target setting
+   - Command is confirmed.
+   - `p[10]` is now interpreted as active target-stop/inhibit state, not stored setting.
+   - The stored setting itself may not be directly exposed in the 20-byte STATUS packet.
 
 3. STATUS `p[19]`
-   - Usually `0x00`.
-   - Reserved/unused/unknown.
+   - `0x00` = OK.
+   - `0x01` = E1 observed; likely tank Hall sensor / tank-presence fault.
+   - `0x02` = E2 candidate / unconfirmed.
+   - Other values unknown.
 
 4. Exact meaning of all `01 29 A1` variants
    - Mode-change sync is understood practically.
@@ -836,10 +897,7 @@ Power:
 
 Night light:
   01 03 A0 00 01 xx = brightness xx, 0..100
-  examples:
-    00 = OFF
-    32 = LOW / 50%
-    64 = HIGH / 100%
+  examples: 00 = OFF, 32 = LOW / 50%, 64 = HIGH / 100%
 
 Display:
   01 05 A1 00 00 = OFF
@@ -861,9 +919,9 @@ Sleep:
   01 29 A1 00 01 00 00 00 00 00 = mode sync/preamble
   01 82 40 00 TT LL HH 09 05 01 = sleep target/band
 
-Stop at target / Auto-off:
+Stop at target / Auto-off behavior command:
   01 E5 A5 00 00 = OFF, keep minimum/maintain
-  01 E5 A5 00 01 = ON, stop output at target
+  01 E5 A5 00 01 = ON, stop output when target-stop condition is active
 
 Request status:
   01 84 40 00 = request full status
